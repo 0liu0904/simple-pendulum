@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>单摆物理模拟器 · Simple Pendulum</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a24; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <script>
+  (() => {
+    'use strict';
+
+    // ============================================================
+    // 1. 基础配置与状态
+    // ============================================================
+    const cfg = {
+      L: 200,                 // 摆长（px）
+      g: 9.8,                 // 重力加速度（m/s²）
+      pxPerMeter: 100,        // 比例尺：100px = 1m，用于把物理量换算到画面
+      initialAngle: Math.PI / 4, // 初始摆角 45°
+      bobRadius: 20,          // 摆球半径
+      trailLength: 46         // 运动拖尾点数
+    };
+
+    const state = {
+      theta: cfg.initialAngle, // 当前摆角（弧度）
+      omega: 0,                // 当前角速度（rad/s）
+      time: 0,                 // 模拟时间
+      paused: false,
+      trail: []
+    };
+
+    const canvas = document.getElementById('scene');
+    const ctx = canvas.getContext('2d');
+    let W = 0, H = 0, DPR = 1;
+
+    // ============================================================
+    // 2. 画布自适应（支持高分屏）
+    // ============================================================
+    function resize() {
+      DPR = Math.min(window.devicePixelRatio || 1, 2);
+      W = window.innerWidth;
+      H = window.innerHeight;
+      canvas.width = Math.round(W * DPR);
+      canvas.height = Math.round(H * DPR);
+      canvas.style.width = W + 'px';
+      canvas.style.height = H + 'px';
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      state.trail.length = 0;
+    }
+
+    window.addEventListener('resize', resize);
+
+    // ============================================================
+    // 3. 几何计算
+    // ============================================================
+    function getPivot() {
+      return {
+        x: W / 2,
+        y: Math.max(80, Math.min(H * 0.22, 220))
+      };
+    }
+
+    function getBob() {
+      const p = getPivot();
+      return {
+        x: p.x + cfg.L * Math.sin(state.theta),
+        y: p.y + cfg.L * Math.cos(state.theta)
+      };
+    }
+
+    // ============================================================
+    // 4. 物理积分：θ'' = −(g / L) · sin(θ)
+    //    采用固定步长 + 半隐式欧拉，保证不同刷新率下运动一致
+    // ============================================================
+    const FIXED_DT = 1 / 240;
+    let accumulator = 0;
+
+    function integrate(dt) {
+      const gPx = cfg.g * cfg.pxPerMeter;       // 把 g 换算为 px/s²
+      const alpha = -(gPx / cfg.L) * Math.sin(state.theta);
+      state.omega += alpha * dt;
+      state.theta += state.omega * dt;
+      state.time += dt;
+    }
+
+    function reset() {
+      state.theta = cfg.initialAngle;
+      state.omega = 0;
+      state.time = 0;
+      state.trail.length = 0;
+      state.paused = false;
+      accumulator = 0;
+    }
+
+    // ============================================================
+    // 5. 绘制
+    // ============================================================
+    function roundRect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    function drawBackground() {
+      // 深灰科技底色
+      ctx.fillStyle = '#1a1a24';
+      ctx.fillRect(0, 0, W, H);
+
+      // 悬点周围的冷色环境光
+      const p = getPivot();
+      const ambient = ctx.createRadialGradient(
+        p.x, p.y, 20,
+        p.x, p.y, Math.max(W, H) * 0.78
+      );
+      ambient.addColorStop(0, 'rgba(58, 120, 210, 0.16)');
+      ambient.addColorStop(0.45, 'rgba(40, 70, 130, 0.06)');
+      ambient.addColorStop(1, 'rgba(26, 26, 36, 0)');
+      ctx.fillStyle = ambient;
+      ctx.fillRect(0, 0, W, H);
+
+      // 细网格
+      const gap = 48;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(120, 180, 255, 0.035)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = (W / 2) % gap; x < W; x += gap) {
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, H);
+      }
+      for (let y = (H / 2) % gap; y < H; y += gap) {
+        ctx.moveTo(0, y + 0.5);
+        ctx.lineTo(W, y + 0.5);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // 同心圆刻度，增强科技感
+      ctx.save();
+      ctx.strokeStyle = 'rgba(90, 170, 255, 0.07)';
+      ctx.setLineDash([4, 8]);
+      for (let i = 1; i <= 3; i++) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, i * 70, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawTrail() {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < state.trail.length; i++) {
+        const t = i / state.trail.length;
+        const pt = state.trail[i];
+        const r = 3 + 9 * t;
+        const alpha = 0.02 + 0.10 * t * t;
+        ctx.beginPath();
+        ctx.fillStyle = 'rgba(90, 200, 255, ' + alpha.toFixed(3) + ')';
+        ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawRod() {
+      const p = getPivot();
+      const b = getBob();
+
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.shadowColor = 'rgba(110, 200, 255, 0.9)';
+      ctx.shadowBlur = 12;
+
+      const grad = ctx.createLinearGradient(p.x, p.y, b.x, b.y);
+      grad.addColorStop(0, 'rgba(170, 225, 255, 0.95)');
+      grad.addColorStop(1, 'rgba(90, 190, 255, 0.62)');
+
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawPivot() {
+      const p = getPivot();
+
+      // 悬挂横梁
+      ctx.save();
+      ctx.strokeStyle = 'rgba(130, 170, 215, 0.28)';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(p.x - 46, p.y);
+      ctx.lineTo(p.x + 46, p.y);
+      ctx.stroke();
+      ctx.restore();
+
+      // 转轴
+      ctx.save();
+      ctx.shadowColor = 'rgba(120, 210, 255, 0.9)';
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = '#2a3348';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#a6e8ff';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawBob() {
+      const b = getBob();
+      const R = cfg.bobRadius;
+
+      // 外层光晕
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const halo = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, R * 3.6);
+      halo.addColorStop(0, 'rgba(110, 220, 255, 0.55)');
+      halo.addColorStop(0.28, 'rgba(70, 170, 255, 0.20)');
+      halo.addColorStop(1, 'rgba(60, 140, 255, 0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, R * 3.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // 球体
+      ctx.save();
+      ctx.shadowColor = '#4fd2ff';
+      ctx.shadowBlur = 26;
+
+      const body = ctx.createRadialGradient(
+        b.x - R * 0.35, b.y - R * 0.40, R * 0.12,
+        b.x, b.y, R
+      );
+      body.addColorStop(0, '#f2ffff');
+      body.addColorStop(0.22, '#a8f0ff');
+      body.addColorStop(0.62, '#2da9e6');
+      body.addColorStop(1, '#0a4f78');
+
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 高光
+      ctx.shadowBlur = 0;
+      const hi = ctx.createRadialGradient(
+        b.x - R * 0.38, b.y - R * 0.42, 0,
+        b.x - R * 0.38, b.y - R * 0.42, R * 0.72
+      );
+      hi.addColorStop(0, 'rgba(255, 255, 255, 0.85)');
+      hi.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = hi;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 描边
+      ctx.strokeStyle = 'rgba(190, 245, 255, 0.65)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, R, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawHUD() {
+      const deg = state.theta * 180 / Math.PI;
+      const period = 2 * Math.PI * Math.sqrt((cfg.L / cfg.pxPerMeter) / cfg.g);
+
+      const x = 20, y = 20, w = 248, h = 136;
+      ctx.save();
+
+      ctx.fillStyle = 'rgba(20, 24, 36, 0.72)';
+      ctx.strokeStyle = 'rgba(90, 180, 255, 0.22)';
+      ctx.lineWidth = 1;
+      roundRect(x, y, w, h, 12);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+
+      ctx.fillStyle = '#e8f6ff';
+      ctx.font = '600 16px "Microsoft YaHei", "PingFang SC", system-ui, sans-serif';
+      ctx.fillText('单摆物理模拟器', x + 16, y + 14);
+
+      ctx.fillStyle = 'rgba(120, 200, 255, 0.55)';
+      ctx.font = '11px "Consolas", "Microsoft YaHei", monospace';
+      ctx.fillText('SIMPLE PENDULUM · SHM', x + 16, y + 37);
+
+      ctx.fillStyle = 'rgba(210, 235, 255, 0.88)';
+      ctx.font = '13px "Consolas", "Microsoft YaHei", monospace';
+      const lines = [
+        'L = ' + cfg.L.toFixed(0) + ' px  (' + (cfg.L / cfg.pxPerMeter).toFixed(2) + ' m)',
+        'g = ' + cfg.g.toFixed(1) + ' m/s²',
+        'θ = ' + deg.toFixed(1) + '°',
+        'T = ' + period.toFixed(2) + ' s'
+      ];
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], x + 16, y + 59 + i * 18);
+      }
+      ctx.restore();
+    }
+
+    function drawHint() {
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = 'rgba(175, 212, 255, 0.48)';
+      ctx.font = '12px "Microsoft YaHei", system-ui, sans-serif';
+      ctx.fillText(
+        '空格 暂停 / 继续   ·   R 重置   ·   θ″ = −(g / L) · sin θ',
+        W / 2, H - 20
+      );
+
+      if (state.paused) {
+        const text = '已暂停';
+        ctx.font = '600 20px "Microsoft YaHei", system-ui, sans-serif';
+        const tw = ctx.measureText(text).width;
+        const bx = W - 36 - tw - 32;
+        const by = 20;
+        const bw = tw + 32;
+        const bh = 42;
+
+        ctx.fillStyle = 'rgba(20, 24, 36, 0.78)';
+        ctx.strokeStyle = 'rgba(120, 210, 255, 0.45)';
+        roundRect(bx, by, bw, bh, 10);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(150, 225, 255, 0.95)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + bw / 2, by + bh / 2 + 1);
+      }
+      ctx.restore();
+    }
+
+    function render() {
+      drawBackground();
+      drawTrail();
+      drawRod();
+      drawPivot();
+      drawBob();
+      drawHUD();
+      drawHint();
+    }
+
+    // ============================================================
+    // 6. 主循环：requestAnimationFrame 驱动
+    // ============================================================
+    let lastTime = performance.now();
+
+    function frame(now) {
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime = now;
+
+      if (!state.paused) {
+        accumulator += dt;
+        let guard = 0;
+        while (accumulator >= FIXED_DT && guard < 30) {
+          integrate(FIXED_DT);
+          accumulator -= FIXED_DT;
+          guard++;
+        }
+
+        // 记录拖尾
+        const b = getBob();
+        state.trail.push({ x: b.x, y: b.y });
+        if (state.trail.length > cfg.trailLength) {
+          state.trail.shift();
+        }
+      }
+
+      render();
+      requestAnimationFrame(frame);
+    }
+
+    // ============================================================
+    // 7. 交互：空格暂停，R 重置
+    // ============================================================
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        state.paused = !state.paused;
+      } else if (e.key === 'r' || e.key === 'R') {
+        reset();
+      }
+    });
+
+    // ============================================================
+    // 8. 启动
+    // ============================================================
+    resize();
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>
