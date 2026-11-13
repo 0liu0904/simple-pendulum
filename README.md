@@ -50,7 +50,7 @@
 
 ## 3. GitHub 仓库链接
 
-> 项目仓库地址：`（在此填写你的 GitHub 仓库链接）`
+> 项目仓库地址：`（https://github.com/0liu0904/simple-pendulum.git）
 
 示例：
 
